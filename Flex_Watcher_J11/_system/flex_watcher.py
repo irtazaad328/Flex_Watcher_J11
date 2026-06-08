@@ -4,7 +4,7 @@ Auto-logins when session expires using Selenium + reCAPTCHA automation.
 Includes FlexHub Dashboard (web UI at http://localhost:5000).
 """
 
-import sys, time, json, hashlib, re, os, logging, threading, webbrowser
+import sys, time, json, hashlib, re, os, logging, threading, webbrowser, textwrap
 from pathlib import Path
 from datetime import datetime
 
@@ -141,12 +141,51 @@ def get_credentials():
     except Exception as e:
         log.warning(f"GUI dialog failed: {e}")
 
-    #Last resort: open a terminal for the user to type in
+    # Last resort for Windows: spawn a visible console window that prompts for credentials
+    # This handles Python 3.13+ where tkinter may not be bundled, or any headless environment
+    if _IS_WINDOWS or _platform.system() == "Windows":
+        try:
+            import subprocess, tempfile
+            helper_script = textwrap.dedent(f"""
+                import json, getpass, sys
+                out = r\"{CONFIG_FILE}\"
+                print("=" * 50)
+                print("  Flex Watcher - Credentials Required")
+                print("=" * 50)
+                print()
+                username = input("  Enter your Flex username: ").strip()
+                password = getpass.getpass("  Enter your Flex password: ").strip()
+                if username and password:
+                    with open(out, "w") as f:
+                        json.dump({{"username": username, "password": password}}, f, indent=2)
+                    print()
+                    print("  [OK] Credentials saved. Flex Watcher will now start.")
+                else:
+                    print("  [ERROR] No credentials entered.")
+                    sys.exit(1)
+                input("  Press Enter to close this window...")
+            """)
+            helper_path = Path(tempfile.gettempdir()) / "fw_cred_helper.py"
+            helper_path.write_text(helper_script, encoding="utf-8")
+
+            # Open a new visible console window and wait for user to finish
+            result = subprocess.run(
+                ["cmd", "/c", "start", "/wait", "cmd", "/k",
+                 f'"{sys.executable}" "{helper_path}" & exit'],
+                shell=False
+            )
+            # Re-check config after the helper ran
+            cfg = load_config()
+            if cfg.get("username") and cfg.get("password"):
+                log.info("Credentials saved via console prompt.")
+                return cfg["username"], cfg["password"]
+        except Exception as e:
+            log.warning(f"Console credential prompt failed: {e}")
+
     log.error("Could not prompt for credentials. Please create the config manually.")
     config_path = CONFIG_FILE
     example = json.dumps({"username": "your_flex_id", "password": "your_password"}, indent=2)
     log.error(f"Create this file:\n  {config_path}\nWith content:\n{example}")
-    # Write a placeholder so the user knows where to put it
     if not CONFIG_FILE.exists():
         CONFIG_FILE.write_text(example, encoding="utf-8")
         log.error(f"A template has been written to:\n  {config_path}\nFill in your credentials, then restart Flex Watcher.")
