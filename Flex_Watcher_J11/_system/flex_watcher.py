@@ -170,9 +170,8 @@ def get_credentials():
 
             # Open a new visible console window and wait for user to finish
             result = subprocess.run(
-                ["cmd", "/c", "start", "/wait", "cmd", "/k",
-                 f'"{sys.executable}" "{helper_path}" & exit'],
-                shell=False
+                f'start /wait cmd /c ""{sys.executable}" "{helper_path}""',
+                shell=True
             )
             # Re-check config after the helper ran
             cfg = load_config()
