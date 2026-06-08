@@ -8,7 +8,11 @@
 ![Platform](https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-333333?style=flat-square)
 ![License](https://img.shields.io/badge/All%20Rights%20Reserved-red?style=flat-square)
 
-Flex Watcher automatically logs into your NUCES Flex portal, fetches your grades, attendance, marks, and transcript, and builds a fully offline dashboard — updated automatically every 2 minutes. It also starts itself on every PC boot. No manual launch needed.
+
+
+Flex Watcher automatically logs into your NUCES Flex portal and builds a fully offline dashboard tracking your grades, attendance, marks, GPA, and transcript — updated every 2 minutes in the background. Get instant desktop notifications the moment anything changes on Flex, without keeping Chrome or the portal open. Auto-starts on every boot. One-time install. No manual launch ever needed.
+
+ 
 
 </div>
 
