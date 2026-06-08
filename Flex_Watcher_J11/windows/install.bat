@@ -6,15 +6,15 @@ echo  ============================================
 echo   Flex Watcher_J11 - Windows Installation
 echo  ============================================
 echo.
-
+ 
 :: ── Find Python ──────────────────────────────────────────────────────────────
 set PYTHON=
 python --version >nul 2>&1
 if not errorlevel 1 ( set PYTHON=python & goto :FIXPIP )
-
+ 
 py --version >nul 2>&1
 if not errorlevel 1 ( set PYTHON=py & goto :FIXPIP )
-
+ 
 :: Search common install locations
 for %%V in (313 312 311 310 39) do (
     if exist "%LOCALAPPDATA%\Programs\Python\Python%%V\python.exe" (
@@ -26,12 +26,12 @@ for %%V in (313 312 311 310 39) do (
         goto :FIXPIP
     )
 )
-
+ 
 :: Microsoft Store Python
 for /f "delims=" %%F in ('where /r "%LOCALAPPDATA%\Microsoft\WindowsApps" python.exe 2^>nul') do (
     set PYTHON="%%F" & goto :FIXPIP
 )
-
+ 
 echo  Python not found. Downloading Python 3.11...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "[Net.ServicePointManager]::SecurityProtocol='Tls12';" ^
@@ -41,7 +41,7 @@ if errorlevel 1 ( echo [ERROR] Download failed. Install from https://python.org 
 del "%TEMP%\py_setup.exe" >nul 2>&1
 set "PATH=%LOCALAPPDATA%\Programs\Python\Python311;%LOCALAPPDATA%\Programs\Python\Python311\Scripts;%PATH%"
 set PYTHON=python
-
+ 
 :: ── Repair pip (handles corrupted pip on any Python install) ─────────────────
 :FIXPIP
 echo  [OK] Python: %PYTHON%
@@ -58,7 +58,7 @@ if errorlevel 1 (
     del "%TEMP%\get-pip.py" >nul 2>&1
 )
 echo  [OK] pip ready.
-
+ 
 :: ── Install packages ─────────────────────────────────────────────────────────
 echo.
 echo  Installing packages...
@@ -68,12 +68,12 @@ if errorlevel 1 (
     %PYTHON% -m pip install requests winotify selenium webdriver-manager flask --quiet --user
 )
 echo  [OK] Packages installed.
-
+ 
 :: ── Pre-cache ChromeDriver ────────────────────────────────────────────────────
 echo.
 echo  Caching ChromeDriver...
 %PYTHON% "%~dp0..\\_system\\cache_driver.py"
-
+ 
 :: ── Auto-start on boot ────────────────────────────────────────────────────────
 echo.
 echo  Setting up auto-start on boot...
@@ -81,17 +81,38 @@ set ROOT=%~dp0..
 for %%I in ("%ROOT%") do set ROOT=%%~fI
 set WATCHER=%ROOT%\_system\flex_watcher.py
 set STARTUP=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup
-
-set PYTHONW=%LOCALAPPDATA%\Programs\Python\Python311\pythonw.exe
-if not exist "%PYTHONW%" (
-    for /f "delims=" %%i in ('where pythonw 2^>nul') do set PYTHONW=%%i
+ 
+:: Derive pythonw.exe from whichever python.exe was found (works for ANY Python version)
+set PYTHONW=
+for %%V in (313 312 311 310 39) do (
+    if exist "%LOCALAPPDATA%\Programs\Python\Python%%V\pythonw.exe" (
+        set PYTHONW=%LOCALAPPDATA%\Programs\Python\Python%%V\pythonw.exe
+        goto :GOTPYTHONW
+    )
 )
-if not exist "%PYTHONW%" set PYTHONW=%PYTHON%
-
+:: Fallback: derive path from PYTHON variable by replacing python.exe with pythonw.exe
+if not "%PYTHON%"=="" (
+    for %%P in (%PYTHON%) do (
+        set _PYDIR=%%~dpP
+    )
+    if exist "%_PYDIR%pythonw.exe" (
+        set PYTHONW=%_PYDIR%pythonw.exe
+        goto :GOTPYTHONW
+    )
+)
+:: Last resort: search PATH (skip msys/cygwin versions which can't run win scripts)
+for /f "delims=" %%i in ('where pythonw 2^>nul') do (
+    echo %%i | findstr /i "msys cygwin mingw" >nul
+    if errorlevel 1 ( set PYTHONW=%%i & goto :GOTPYTHONW )
+)
+:: If still nothing, use python.exe (will show a flash console window but works)
+set PYTHONW=%PYTHON%
+:GOTPYTHONW
+ 
 echo Set w=CreateObject("WScript.Shell") > "%STARTUP%\FlexWatcher.vbs"
 echo w.Run Chr(34)^&"%PYTHONW%"^&Chr(34)^&" "^&Chr(34)^&"%WATCHER%"^&Chr(34)^,0^,False >> "%STARTUP%\FlexWatcher.vbs"
 echo  [OK] Auto-start configured.
-
+ 
 :: ── Start watcher now ─────────────────────────────────────────────────────────
 echo.
 echo  Starting Flex Watcher...
@@ -100,13 +121,13 @@ if exist "%PYTHONW%" (
 ) else (
     start "" /min %PYTHON% "%WATCHER%"
 )
-
+ 
 echo.
 echo  Generating dashboard...
 timeout /t 4 /nobreak >nul
 %PYTHON% "%ROOT%\_system\generate_dashboard.py" --no-open >nul 2>&1
 echo  [OK] Dashboard generated.
-
+ 
 echo.
 echo  ============================================
 echo   DONE!
