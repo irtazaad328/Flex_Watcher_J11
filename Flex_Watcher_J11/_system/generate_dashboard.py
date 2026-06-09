@@ -43,7 +43,7 @@ def calc_cgpa_weighted(transcript):
         if isinstance(v,dict) and v.get("is_pending_repeat"):
             continue  # repeat in progress, grade not uploaded yet
         g  = v.get("grade","F") if isinstance(v,dict) else v
-        if g in ("I","S","U"):  # skip incomplete and non-credit
+        if g in ("I","S","U","W"):  # skip incomplete, non-credit, and withdrawn
             continue
         ch = int(v.get("credit_hours",3)) if isinstance(v,dict) else 3
         ch = max(1, min(ch, 6))
@@ -178,6 +178,36 @@ def generate(open_browser=True):
         for code,val in transcript.items():
             if isinstance(val,dict): tr[code]=val
             else: tr[code]={"grade":val,"name":cmap.get(code,""),"credit_hours":3}
+
+    # Collect course codes that are Withdrawn (grade W) in the transcript.
+    # Excluded from marks portal, sem summary, SGPA, what-if, and planner.
+    # Transcript keys are compact e.g. "DS201"; marks/sem keys may be "DS 201" or "DS201"
+    # Normalize by removing spaces for comparison.
+    withdrawn_codes = {
+        code.replace(" ", "").upper() for code, v in tr.items()
+        if (v.get("grade") if isinstance(v, dict) else v) == "W"
+    }
+    def _norm(course_label):
+        return course_label.split()[0].replace(" ", "").upper() if " " not in course_label.split()[0]                else course_label.replace(" ", "").upper().split()[0]
+    def _is_withdrawn(course_label):
+        # strip spaces from the course code portion and compare
+        raw = course_label.split()
+        # marks keys look like "DS 201 Theory" or "DS201" — normalize first token+second if numeric
+        code = raw[0]
+        if len(raw) > 1 and raw[1].isdigit():
+            code = raw[0] + raw[1]
+        return code.replace(" ", "").upper() in withdrawn_codes
+
+    # Filter sem_sum — removes W courses from SGPA, semester summary, what-if, planner
+    sem_sum = {
+        course: data for course, data in sem_sum.items()
+        if not _is_withdrawn(course)
+    }
+    # Filter marks portal — W courses still scraped but not displayed
+    marks = {
+        course: entries for course, entries in marks.items()
+        if not _is_withdrawn(course)
+    }
 
     cgpa     = calc_cgpa_weighted(tr)
     sem_qp = sum(v["gp"] * guess_ch(c, tr, current_sem_ch) for c,v in sem_sum.items())
@@ -326,7 +356,7 @@ def generate(open_browser=True):
     NON_CREDIT_GRADES = {"S","U","NC"}  # satisfactory/unsatisfactory/non-credit
 
     if tr:
-        n_done = len([k for k,v in tr.items() if v.get("grade") not in ("I","S","U","NC") and not v.get("is_replaced") and not v.get("is_pending_repeat")])
+        n_done = len([k for k,v in tr.items() if v.get("grade") not in ("I","S","U","NC","W") and not v.get("is_replaced") and not v.get("is_pending_repeat")])
         cgcard = (f'<div class="stat-card ac" style="max-width:260px;margin-bottom:24px">'
                   f'<div class="sc-lbl">Cumulative CGPA</div><div class="sc-val">{cgpa_val}</div>'
                   f'<div class="sc-sub">{n_done} Courses Completed</div></div>') if cgpa else ""
@@ -355,9 +385,10 @@ def generate(open_browser=True):
                 is_nc = g in NON_CREDIT_GRADES
                 is_replaced = v.get("is_replaced", False)  # old repeat attempt
                 is_repeat   = v.get("is_repeat", False)    # newest repeat attempt
-                gp = GRADE_POINTS.get(g,0.0) if not is_nc else 0.0
+                is_withdrawn = (g == "W")
+                gp = GRADE_POINTS.get(g,0.0) if not is_nc and not is_withdrawn else 0.0
                 # is_replaced only affects CGPA — it still counts in the sem it was taken
-                if not is_nc:
+                if not is_nc and not is_withdrawn:
                     sub_qp += gp*ch
                     sub_ch += ch
                 gc = gcls(g)
@@ -373,6 +404,11 @@ def generate(open_browser=True):
                     gp_display = "—"
                     grade_cell = f'<span class="gc" style="background:rgba(100,116,139,.15);color:var(--mut)">{g}</span>'
                     row_style = ""
+                elif g == "W":
+                    status_html = '<span style="color:var(--yel);font-size:.75rem">Withdrawn</span>'
+                    gp_display = "—"
+                    grade_cell = '<span class="gc" style="background:rgba(200,146,42,.12);color:var(--yel)">W</span>'
+                    row_style = ' style="opacity:0.65;"'
                 else:
                     repeat_tag = ' <span style="color:#a98fd4;font-size:.68rem;background:rgba(169,143,212,.12);padding:1px 5px;border-radius:4px">Repeat</span>' if is_repeat else ""
                     status_html = f'<span style="color:{"var(--grn)" if gp>=1.0 else "var(--red)"};font-weight:600">{"Pass" if gp>=1.0 else "Fail"}</span>{repeat_tag}'
@@ -484,7 +520,7 @@ def generate(open_browser=True):
     else:
         whatif_html = '<div class="empty"><span class="bi">🎯</span>Semester definitions uninitialized.</div>'
 
-    n_done   = len([k for k,v in tr.items() if v.get("grade") != "I"])
+    n_done   = len([k for k,v in tr.items() if v.get("grade") not in ("I","W")])
     n_sem    = len(sem_sum)
     cgpa_now = cgpa or 0.0
     sgpa_now = sgpa or 0.0
@@ -926,7 +962,7 @@ function genPdf(){
       const strikeStyle = isReplaced ? 'text-decoration:line-through;' : '';
       const repeatedTag = isReplaced ? ' <span style="font-size:6pt;background:#dbeafe;color:#1e40af;padding:1px 4px;border-radius:3px">Repeated</span>' : (v.is_repeat ? ' <span style="font-size:6pt;background:#dbeafe;color:#1e40af;padding:1px 4px;border-radius:3px">Repeat</span>' : '');
       const gpCell = isReplaced ? '—' : isNC ? '—' : gp.toFixed(2);
-      const remarkCell = isReplaced ? 'Replaced' : isNC ? 'Non-Credit' : gp>=1 ? 'Pass' : 'Fail';
+      const remarkCell = isReplaced ? 'Replaced' : isNC ? 'Non-Credit' : v.grade==='W' ? 'Withdrawn' : gp>=1 ? 'Pass' : 'Fail';
       const remarkColor = isReplaced ? '#64748b' : isNC ? '#64748b' : gp>=1 ? '#155e8a' : '#991b1b';
       const gradeColor = isNC ? '#64748b' : gc;
       semRows += `<tr style="background:${bg};${opacity}">
