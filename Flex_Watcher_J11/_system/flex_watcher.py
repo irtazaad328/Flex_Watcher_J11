@@ -250,12 +250,11 @@ def auto_login(username, password):
         else:
             driver = webdriver.Chrome(options=options)
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        # On Mac/Linux move window off-screen immediately after launch
-        if _platform.system() != "Windows":
-            try:
-                driver.set_window_position(-2000, 0)
-            except Exception:
-                pass
+        # Move window off-screen immediately after launch on all platforms
+        try:
+            driver.set_window_position(-32000, 0)
+        except Exception:
+            pass
         _wait_sec = 30 if _platform.system() == "Windows" else 90
         wait = WebDriverWait(driver, _wait_sec)
 
