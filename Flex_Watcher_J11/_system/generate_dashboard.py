@@ -209,6 +209,43 @@ def generate(open_browser=True):
         if not _is_withdrawn(course)
     }
 
+    # Override predicted grade/gp with actual uploaded transcript grade.
+    # ONLY for the current semester — not old grades from previous semesters.
+    # e.g. CS1005 Spring 2026 grade C uploaded → override predicted D with C.
+    # But CS1002 has D from Fall 2025 (repeat, Spring 2026 still I) → do NOT use D.
+
+    # Detect current semester: the one that has at least one "I" grade
+    # (i.e. grades are still being published for it)
+    current_sem_name = None
+    for sem_name, courses in transcript.items():
+        if isinstance(courses, dict) and any(
+            (v.get("grade") if isinstance(v, dict) else v) == "I"
+            for v in courses.values()
+        ):
+            current_sem_name = sem_name
+            break
+
+    # Build lookup of ONLY current semester real grades (not I, not W)
+    real_grades = {}
+    if current_sem_name and isinstance(transcript.get(current_sem_name), dict):
+        for code, v in transcript[current_sem_name].items():
+            g = v.get("grade") if isinstance(v, dict) else v
+            if g and g not in ("I", "W") and g in GRADE_POINTS:
+                real_grades[code.replace(" ", "").upper()] = g
+
+    def _real_grade_for(course_label):
+        raw = course_label.split()
+        code = raw[0]
+        if len(raw) > 1 and raw[1].isdigit():
+            code = raw[0] + raw[1]
+        return real_grades.get(code.replace(" ", "").upper())
+
+    for course, data in sem_sum.items():
+        rg = _real_grade_for(course)
+        if rg and rg in GRADE_POINTS:
+            data["grade"] = rg
+            data["gp"]    = GRADE_POINTS[rg]
+
     cgpa     = calc_cgpa_weighted(tr)
     sem_qp = sum(v["gp"] * guess_ch(c, tr, current_sem_ch) for c,v in sem_sum.items())
     sem_ch = sum(guess_ch(c, tr, current_sem_ch) for c in sem_sum)
@@ -526,6 +563,10 @@ def generate(open_browser=True):
     sgpa_now = sgpa or 0.0
     gp_js    = json.dumps(GRADE_POINTS)
     thr_js   = json.dumps([[r[0],r[2],r[3]] for r in GRADE_TABLE])
+    # locked_grades: current-sem course codes whose grade was uploaded (not predicted)
+    locked_grades = set(real_grades.keys())  # already normalised uppercase no-space
+    locked_js = json.dumps(list(locked_grades))
+
     sem_js   = json.dumps({c:{"obt":v["obt"],"tot":v["tot"],"rem":v["rem"],
                                "pct":v["pct"],"grade":v["grade"],"gp":v["gp"],
                                "ch":guess_ch(c, tr, current_sem_ch)} for c,v in sem_sum.items()})
@@ -543,7 +584,8 @@ def generate(open_browser=True):
         n_done=n_done, n_sem=n_sem, cgpa_now=cgpa_now, sgpa_now=sgpa_now,
         gp_js=gp_js, thr_js=thr_js, sem_js=sem_js, tr_js=tr_js, cs_js=cs_js,
         whatif_html=whatif_html, student_info=student_info, si_js=si_js,
-        cur_ch_js=json.dumps(current_sem_ch)
+        cur_ch_js=json.dumps(current_sem_ch),
+        locked_js=locked_js
     )
 
     OUT_FILE.write_text(html, encoding="utf-8")
@@ -1138,7 +1180,8 @@ function calcCgpa(){
     if (s.grade === "I") return;
     const semCourseCode = cc.split(' ')[0];
     const ch = (typeof CUR_CH !== 'undefined' && CUR_CH[semCourseCode]) || s.ch || 3;
-    if (s.rem <= 0 || s.gp >= 3.67) {
+    const isCgpaLocked = LOCKED_GRADES.has(semCourseCode.replace(/ /g,"").toUpperCase());
+    if (isCgpaLocked || s.rem <= 0 || s.gp >= 3.67) {
       locked_qp += s.gp * ch;
       locked_ch += ch;
     } else {
@@ -1187,10 +1230,11 @@ function calcCgpa(){
       const surplus = ((s.gp - target_sgpa) * ch).toFixed(2);
       action = `Generating +${surplus} points. Overwriting old historical drag value.`;
     } 
-    else if (s.rem <= 0) {
+    else if (LOCKED_GRADES.has(semCourseCode.replace(/ /g,"").toUpperCase()) || s.rem <= 0) {
       stateColor = '#d4614a';
-      status = `Locked (${s.grade})`;
-      action = 'Evaluations complete. Baseline tracking updated around this node.';
+      const isTrLocked = LOCKED_GRADES.has(semCourseCode.replace(/ /g,"").toUpperCase());
+      status = isTrLocked ? `Grade Uploaded (${s.grade})` : `Locked (${s.grade})`;
+      action = isTrLocked ? 'Final grade uploaded to transcript. Locked into CGPA calculation.' : 'Evaluations complete. Baseline tracking updated around this node.';
     } 
     else {
       const optimizedTarget = minGradeForGP(adjusted_baseline);
@@ -1238,7 +1282,8 @@ function calcSgpa(){
     const ch = (typeof CUR_CH !== 'undefined' && CUR_CH[semCourseCode]) || s.ch || 3;
     total_sem_ch += ch;
     
-    if (s.rem <= 0 || s.gp >= 3.67) {
+    const isGradeLocked = LOCKED_GRADES.has(semCourseCode.replace(/ /g,"").toUpperCase());
+    if (isGradeLocked || s.rem <= 0 || s.gp >= 3.67) {
       locked_qp += s.gp * ch;
       locked_ch += ch;
     } else {
@@ -1277,10 +1322,11 @@ function calcSgpa(){
       const surplus = ((s.gp - target) * ch).toFixed(2);
       action = `Offloading +${surplus} surplus points to insulate adjacent risks.`;
     } 
-    else if (s.rem <= 0) {
+    else if (LOCKED_GRADES.has(semCourseCode.replace(/ /g,"").toUpperCase()) || s.rem <= 0) {
       stateColor = '#d4614a';
-      status = `Locked (${s.grade})`;
-      action = 'Evaluations finalized. Matrix recalculated dynamically.';
+      const isTranscriptLocked = LOCKED_GRADES.has(semCourseCode.replace(/ /g,"").toUpperCase());
+      status = isTranscriptLocked ? `Grade Uploaded (${s.grade})` : `Locked (${s.grade})`;
+      action = isTranscriptLocked ? 'Final grade uploaded to transcript. Locked into calculation.' : 'Evaluations finalized. Matrix recalculated dynamically.';
     } 
     else {
       const optimizedTarget = minGradeForGP(adjusted_baseline);
@@ -1492,6 +1538,7 @@ function initFormValues() {
         f"const TR_DATA={d['tr_js']};"
         f"const CLASS_STATS={d['cs_js']};"
         f"const CUR_CH={d['cur_ch_js']};"
+        f"const LOCKED_GRADES=new Set({d['locked_js']});"
         f"const STUDENT_INFO={d['si_js']};"
         + js +
         f"const _GENERATED='{d['now']}';"
