@@ -25,7 +25,8 @@ DASHBOARD_PORT = 5000
 STATE_FILE  = DATA_DIR / "flex_state.json"
 LOG_FILE    = DATA_DIR / "flex_watcher.log"
 CONFIG_FILE = DATA_DIR / "config.json"
-COOKIE_FILE = DATA_DIR / "flex_cookie.txt"
+COOKIE_FILE     = DATA_DIR / "flex_cookie.txt"
+ALL_COOKIES_FILE = DATA_DIR / "flex_cookies_all.json"
 NOTIF_FILE  = DATA_DIR / "flex_notifications.json"
 LOCK_FILE_PATH = DATA_DIR / "login.lock"
 
@@ -397,6 +398,14 @@ def auto_login(username, password):
         if cookie:
             value = cookie["value"]
             COOKIE_FILE.write_text(value, encoding="utf-8")
+            # Save ALL cookies so requests session can fully impersonate the browser
+            try:
+                ALL_COOKIES_FILE.write_text(
+                    json.dumps([{k: c.get(k,"") for k in ("name","value","domain","path")} for c in cookies]),
+                    encoding="utf-8"
+                )
+            except Exception as e:
+                log.debug(f"Could not save all cookies: {e}")
             notify("✅ Auto-Login Successful", ["Flex session renewed automatically.", "Monitoring resumed."])
             return value
         else:
@@ -438,7 +447,21 @@ def get_cookie(username, password):
 
 def build_session(cookie_value):
     s = requests.Session()
-    s.cookies.set("ASP.NET_SessionId", cookie_value, domain="flexstudent.nu.edu.pk", path="/")
+    # Load all cookies if available — needed for FLEX to honour SemId POSTs
+    if ALL_COOKIES_FILE.exists():
+        try:
+            all_cookies = json.loads(ALL_COOKIES_FILE.read_text(encoding="utf-8"))
+            for c in all_cookies:
+                s.cookies.set(c["name"], c["value"],
+                              domain=c.get("domain","flexstudent.nu.edu.pk"),
+                              path=c.get("path","/")
+                )
+            log.debug(f"Loaded {len(all_cookies)} cookies into session")
+        except Exception as e:
+            log.debug(f"Could not load all cookies: {e}")
+            s.cookies.set("ASP.NET_SessionId", cookie_value, domain="flexstudent.nu.edu.pk", path="/")
+    else:
+        s.cookies.set("ASP.NET_SessionId", cookie_value, domain="flexstudent.nu.edu.pk", path="/")
     if _platform.system() == "Darwin":
         _ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     elif _platform.system() == "Linux":
@@ -1143,29 +1166,78 @@ def start_dashboard():
 
 #One check cycle ─────
 def get_current_sem_id(sess, cached_urls):
+    """
+    Pick the semester to scrape marks/attendance for.
+
+    FLEX defaults to the current calendar semester (e.g. Summer 2026)
+    even if the student has no courses in it.  When that happens the
+    marks page comes back empty.  We detect that case and fall back to
+    the most-recent previous semester that actually contains courses,
+    so grades/attendance from a just-finished semester keep updating
+    until every course has a final grade.
+    """
     cached = cached_urls.get("sem_id")
     html, final_url = fetch(sess, BASE + "/Student/StudentMarks")
     if not is_logged_in(html, final_url) or not html:
         return cached, html, final_url
 
-    m = re.search(r'<option[^>]+value=["\'](\d{5,6})["\'][^>]*selected', html, re.I)
+    # Collect ALL semester options from the dropdown: [(sem_id, label), ...]
+    all_opts = re.findall(
+        r'<option[^>]+value=["\'](\d{5,6})["\'"][^>]*>\s*([^<]+?)\s*</option>',
+        html, re.I
+    )
+    all_ids = [oid for oid, _ in all_opts]
+
+    # Which one is currently selected by FLEX?
+    m = re.search(r'<option[^>]+value=["\'](\d{5,6})["\'"][^>]*selected', html, re.I)
     if not m:
         m = re.search(r'selected[^>]*value=["\'](\d{5,6})["\']', html, re.I)
-    if not m:
-        all_ids = re.findall(r'<option[^>]+value=["\'](\d{5,6})["\']', html, re.I)
-        if all_ids:
-            sem_id = max(all_ids)
-            log.info(f"SemId auto-detected (latest): {sem_id}")
-            return sem_id, html, final_url
+    selected_id = m.group(1) if m else (max(all_ids) if all_ids else None)
 
-    if m:
-        sem_id = m.group(1)
-        log.info(f"SemId auto-detected (selected): {sem_id}")
-        return sem_id, html, final_url
+    if not selected_id:
+        fallback = cached or "0"
+        log.warning(f"Could not detect SemId — using cached/fallback: {fallback}")
+        return fallback, html, final_url
 
-    fallback = cached or "0"
-    log.warning(f"Could not detect SemId — using cached/fallback: {fallback}")
-    return fallback, html, final_url
+    # Check if the selected semester actually has marks on this page
+    def _has_courses(page_html):
+        return bool(re.search(r'href="#[A-Z]{2,}\d{3,}"', page_html or "", re.I))
+
+    if _has_courses(html):
+        log.info(f"SemId {selected_id} has courses — using it.")
+        return selected_id, html, final_url
+
+    # Selected semester is empty (e.g. Summer with no enrolment).
+    # Try previous semesters in descending order until we find one with courses.
+    log.info(f"SemId {selected_id} appears empty — looking for last non-empty semester.")
+
+    # FLEX requires the antiforgery token in the POST — extract it from the page.
+    # Without it the server ignores SemId and returns the default semester again.
+    def _extract_token(page_html):
+        t = page_html or ""
+        m = re.search(r'name="__RequestVerificationToken"[^>]+value="([^"]+)"', t, re.I)
+        if not m:
+            m = re.search(r"name='__RequestVerificationToken'[^>]+value='([^']+)'", t, re.I)
+        return m.group(1) if m else None
+    token = _extract_token(html)
+
+    sorted_ids = sorted(set(all_ids), reverse=True)
+    for sid in sorted_ids:
+        if sid == selected_id:
+            continue
+        post = {"SemId": sid}
+        if token:
+            post["__RequestVerificationToken"] = token
+        alt_html, alt_url = fetch(sess, BASE + "/Student/StudentMarks", post_data=post)
+        if not is_logged_in(alt_html, alt_url):
+            break
+        if _has_courses(alt_html):
+            log.info(f"Falling back to SemId {sid} (has courses).")
+            return sid, alt_html, alt_url
+
+    # Nothing found — return selected as-is (might genuinely be empty)
+    log.info(f"No non-empty previous semester found, using selected: {selected_id}")
+    return selected_id, html, final_url
 
 def run_check(sess):
     state  = load_state()
@@ -1181,7 +1253,13 @@ def run_check(sess):
         re.search(r'href="#[A-Z]{2,3}\d{3,4}"', html or "", re.I))
 
     if not has_marks and sem_id and sem_id != "0":
-        html, final_url = fetch(sess, BASE + "/Student/StudentMarks", post_data={"SemId": sem_id})
+        # Re-fetch marks with token so FLEX honours the SemId
+        _mk_token_m = re.search(r'name="__RequestVerificationToken"[^>]+value="([^"]+)"', html or "", re.I)
+        if not _mk_token_m:
+            _mk_token_m = re.search(r"name='__RequestVerificationToken'[^>]+value='([^']+)'", html or "", re.I)
+        _mk_post = {"SemId": sem_id}
+        if _mk_token_m: _mk_post["__RequestVerificationToken"] = _mk_token_m.group(1)
+        html, final_url = fetch(sess, BASE + "/Student/StudentMarks", post_data=_mk_post)
 
     if is_network_error(html, final_url):
         log.warning("Network error — skipping check, will retry next cycle.")
@@ -1229,20 +1307,53 @@ def run_check(sess):
     except Exception as e:
         log.debug(f"Class stats fetch error: {e}")
 
-    att_url = new_u.get("attendance") or urls.get("attendance") or BASE + "/Student/StudentAttendance"
-    html, final_url = fetch(sess, att_url)
-    if is_logged_in(html, final_url):
-        h = page_hash(html)
-        if "attendance" not in hashes:
-            new_s["attendance"] = parse_attendance(html); new_h["attendance"] = h
-            log.info("Attendance: seeded.")
-        elif h != hashes["attendance"]:
-            ns = parse_attendance(html)
-            changes = diff_attendance(snaps.get("attendance", {}), ns)
-            if changes: notify("📅 Attendance Updated!", changes)
-            new_s["attendance"] = ns; new_h["attendance"] = h
+    # Attendance page has the same semester dropdown as marks.
+    # FLEX ignores the ?semid= GET param and uses whatever is selected server-side.
+    # Must POST with SemId + antiforgery token — same approach as marks.
+    att_base_url = BASE + "/Student/StudentAttendance"
+    att_html_init, att_url_init = fetch(sess, att_base_url)
+    if is_logged_in(att_html_init, att_url_init) and sem_id and sem_id != "0":
+        # extract token from the attendance page itself
+        def _att_token(page_html):
+            t = page_html or ""
+            m = re.search(r'name="__RequestVerificationToken"[^>]+value="([^"]+)"', t, re.I)
+            if not m:
+                m = re.search(r"name='__RequestVerificationToken'[^>]+value='([^']+)'", t, re.I)
+            return m.group(1) if m else None
+        att_token = _att_token(att_html_init)
+        att_post = {"SemId": sem_id}
+        if att_token:
+            att_post["__RequestVerificationToken"] = att_token
+            log.info(f"Attendance: POSTing SemId={sem_id} with token")
         else:
-            log.info("Attendance: no changes.")
+            log.warning("Attendance: no antiforgery token found — POST may be ignored by FLEX")
+        html, final_url = fetch(sess, att_base_url, post_data=att_post)
+        parsed_check = parse_attendance(html) if html else {}
+        if not parsed_check:
+            # POST failed or returned wrong semester — try GET with semid param
+            log.warning(f"Attendance POST returned empty — trying GET with ?semid={sem_id}")
+            html, final_url = fetch(sess, att_base_url + f"?semid={sem_id}")
+        new_u["attendance"] = att_base_url
+    else:
+        html, final_url = att_html_init, att_url_init
+    if is_logged_in(html, final_url):
+        ns_att = parse_attendance(html)
+        if not ns_att:
+            # Empty parse — wrong semester or page not ready.
+            # Do NOT save hash so we retry next cycle.
+            log.warning("Attendance: parsed empty — will retry next cycle.")
+        else:
+            h = page_hash(html)
+            if "attendance" not in hashes or not snaps.get("attendance"):
+                new_s["attendance"] = ns_att; new_h["attendance"] = h
+                log.info("Attendance: seeded.")
+            elif h != hashes["attendance"]:
+                changes = diff_attendance(snaps.get("attendance", {}), ns_att)
+                if changes: notify("📅 Attendance Updated!", changes)
+                new_s["attendance"] = ns_att; new_h["attendance"] = h
+                log.info(f"Attendance: updated ({len(changes)} changes).")
+            else:
+                log.info("Attendance: no changes.")
 
     tr_url = new_u.get("transcript") or urls.get("transcript") or TRANSCRIPT_URL
     html, final_url = fetch(sess, tr_url)
